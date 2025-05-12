@@ -1,0 +1,477 @@
+# version that represents policy combinations as normal (matrix) form game
+import random
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# Global flag: if True, scale a unit's efficiency by (current health / max health)
+SCALE_EFFICIENCY = True
+
+# -----------------------------
+# Unit Class Definition
+# -----------------------------
+class Unit:
+    def __init__(self, unit_type, health, efficiencies):
+        """
+        :param unit_type: String identifier (e.g. "A", "B", "X", "Y").
+        :param health: Initial (and maximum) health points.
+        :param efficiencies: Dictionary mapping enemy types to base damage per timestep.
+                             E.g., {"X": 2, "Y": 3} means 2 damage vs. X and 3 vs. Y.
+        """
+        self.unit_type = unit_type
+        self.health = health
+        self.max_health = health
+        self.efficiencies = efficiencies
+
+    def __repr__(self):
+        return f"{self.unit_type}(HP:{self.health})"
+
+# -----------------------------
+# Helper: Compute Composition
+# -----------------------------
+def compute_composition(army):
+    """
+    Returns a tuple (composition, total) where composition is a dict mapping unit types to counts.
+    """
+    comp = {}
+    for unit in army:
+        comp[unit.unit_type] = comp.get(unit.unit_type, 0) + 1
+    return comp, len(army)
+
+# -----------------------------
+# Helper: Efficiency Scaling
+# -----------------------------
+def get_scaled_efficiency(unit, key):
+    """
+    Returns the effective efficiency for a unit for a given enemy type key.
+    If SCALE_EFFICIENCY is True, scales by (current health / max_health).
+    """
+    base = unit.efficiencies[key]
+    return base * (unit.health / unit.max_health) if SCALE_EFFICIENCY else base
+
+# -----------------------------
+# Helper: Damage Allocation (Killable Feature)
+# -----------------------------
+def allocate_damage_to_targets(ordered_targets, attack_power, allocated_damage, remaining_health, verbose=False):
+    """
+    Given an ordered list of enemy targets (ordered highest score first), allocate the attacker's fixed damage.
+    If any target can be killed with the remaining damage, allocate exactly its remaining health.
+    Otherwise, assign all remaining damage to the top candidate.
+    """
+    damage_left = attack_power
+    while damage_left > 0 and ordered_targets:
+        killable = [enemy for enemy in ordered_targets if remaining_health[enemy] <= damage_left]
+        if killable:
+            for enemy in ordered_targets:
+                if remaining_health[enemy] <= damage_left:
+                    alloc = remaining_health[enemy]
+                    allocated_damage[enemy] += alloc
+                    damage_left -= alloc
+                    remaining_health[enemy] = 0
+                    if verbose:
+                        print(f"    Allocated {alloc} damage to {enemy} (killed)")
+                    ordered_targets.remove(enemy)
+                    break
+        else:
+            enemy = ordered_targets[0]
+            alloc = min(damage_left, remaining_health[enemy])
+            allocated_damage[enemy] += alloc
+            remaining_health[enemy] -= alloc
+            damage_left -= alloc
+            if verbose:
+                print(f"    Allocated {alloc} damage to {enemy} (not killed)")
+            if remaining_health[enemy] <= 0:
+                ordered_targets.remove(enemy)
+    return allocated_damage
+
+# -----------------------------
+# OLD (Non‑Health Adjusted) Policies
+# -----------------------------
+def old_most_efficient(attacking_army, enemy_army, verbose=False):
+    allocated_damage = {enemy: 0 for enemy in enemy_army}
+    remaining_health = {enemy: enemy.health for enemy in enemy_army}
+    attackers = list(attacking_army)
+    random.shuffle(attackers)
+    for attacker in attackers:
+        available = [enemy for enemy in enemy_army
+                     if remaining_health[enemy] > 0 and enemy.unit_type in attacker.efficiencies]
+        if not available:
+            continue
+        ordered_targets = sorted(
+            available,
+            key=lambda enemy: (get_scaled_efficiency(attacker, enemy.unit_type), 1/enemy.health),
+            reverse=True
+        )
+        attack_power = max(attacker.efficiencies.values())
+        if verbose:
+            print(f"{attacker} (power {attack_power}) OLD most_efficient targets: {ordered_targets}")
+        allocate_damage_to_targets(ordered_targets, attack_power, allocated_damage, remaining_health, verbose)
+    return allocated_damage
+
+def old_most_dangerous(attacking_army, enemy_army, verbose=False):
+    allocated_damage = {enemy: 0 for enemy in enemy_army}
+    remaining_health = {enemy: enemy.health for enemy in enemy_army}
+    attackers = list(attacking_army)
+    random.shuffle(attackers)
+    for attacker in attackers:
+        available = [enemy for enemy in enemy_army
+                     if remaining_health[enemy] > 0 and enemy.unit_type in attacker.efficiencies]
+        if not available:
+            continue
+        ordered_targets = sorted(
+            available,
+            key=lambda enemy: (get_scaled_efficiency(enemy, attacker.unit_type), 1/enemy.health),
+            reverse=True
+        )
+        attack_power = max(attacker.efficiencies.values())
+        if verbose:
+            print(f"{attacker} (power {attack_power}) OLD most_dangerous targets: {ordered_targets}")
+        allocate_damage_to_targets(ordered_targets, attack_power, allocated_damage, remaining_health, verbose)
+    return allocated_damage
+
+def old_product(attacking_army, enemy_army, verbose=False):
+    allocated_damage = {enemy: 0 for enemy in enemy_army}
+    remaining_health = {enemy: enemy.health for enemy in enemy_army}
+    attackers = list(attacking_army)
+    random.shuffle(attackers)
+    for attacker in attackers:
+        available = [enemy for enemy in enemy_army
+                     if remaining_health[enemy] > 0 and enemy.unit_type in attacker.efficiencies]
+        if not available:
+            continue
+        candidates = []
+        for enemy in available:
+            effective_vul = get_scaled_efficiency(attacker, enemy.unit_type)
+            effective_danger = get_scaled_efficiency(enemy, attacker.unit_type)
+            product = effective_vul * effective_danger
+            candidates.append((enemy, product, 1/enemy.health))
+        candidates.sort(key=lambda x: (x[1], x[2]), reverse=True)
+        ordered_targets = [enemy for enemy, prod, _ in candidates]
+        attack_power = max(attacker.efficiencies.values())
+        if verbose:
+            print(f"{attacker} (power {attack_power}) OLD product targets:")
+            for enemy, prod, invh in candidates:
+                print(f"  {enemy} product: {prod:.2f}, 1/health: {invh:.2f}")
+        allocate_damage_to_targets(ordered_targets, attack_power, allocated_damage, remaining_health, verbose)
+    return allocated_damage
+
+def old_weighted_product(attacking_army, enemy_army, verbose=False):
+    allocated_damage = {enemy: 0 for enemy in enemy_army}
+    remaining_health = {enemy: enemy.health for enemy in enemy_army}
+    composition, total_attackers = compute_composition(attacking_army)
+    enemy_weighted_danger = {}
+    for enemy in enemy_army:
+        tot = sum(get_scaled_efficiency(enemy, t) * count for t, count in composition.items())
+        enemy_weighted_danger[enemy] = tot / total_attackers if total_attackers > 0 else 0
+    attackers = list(attacking_army)
+    random.shuffle(attackers)
+    for attacker in attackers:
+        available = [enemy for enemy in enemy_army
+                     if remaining_health[enemy] > 0 and enemy.unit_type in attacker.efficiencies]
+        if not available:
+            continue
+        candidates = []
+        for enemy in available:
+            effective_vul = get_scaled_efficiency(attacker, enemy.unit_type)
+            product = enemy_weighted_danger[enemy] * effective_vul
+            candidates.append((enemy, product, 1/enemy.health))
+        candidates.sort(key=lambda x: (x[1], x[2]), reverse=True)
+        ordered_targets = [enemy for enemy, prod, _ in candidates]
+        attack_power = max(attacker.efficiencies.values())
+        if verbose:
+            print(f"{attacker} (power {attack_power}) OLD weighted_product targets:")
+            for enemy, prod, invh in candidates:
+                print(f"  {enemy} weighted product: {prod:.2f}, 1/health: {invh:.2f} (weighted danger: {enemy_weighted_danger[enemy]:.2f})")
+        allocate_damage_to_targets(ordered_targets, attack_power, allocated_damage, remaining_health, verbose)
+    return allocated_damage
+
+def old_weighted_danger(attacking_army, enemy_army, verbose=False):
+    allocated_damage = {enemy: 0 for enemy in enemy_army}
+    remaining_health = {enemy: enemy.health for enemy in enemy_army}
+    composition, total_attackers = compute_composition(attacking_army)
+    enemy_weighted_danger = {}
+    for enemy in enemy_army:
+        tot = sum(get_scaled_efficiency(enemy, t) * count for t, count in composition.items())
+        enemy_weighted_danger[enemy] = tot / total_attackers if total_attackers > 0 else 0
+    attackers = list(attacking_army)
+    random.shuffle(attackers)
+    for attacker in attackers:
+        available = [enemy for enemy in enemy_army
+                     if remaining_health[enemy] > 0 and enemy.unit_type in attacker.efficiencies]
+        if not available:
+            continue
+        ordered_targets = sorted(
+            available,
+            key=lambda enemy: (enemy_weighted_danger[enemy], 1/enemy.health),
+            reverse=True
+        )
+        attack_power = max(attacker.efficiencies.values())
+        if verbose:
+            print(f"{attacker} (power {attack_power}) OLD weighted_danger targets:")
+            for enemy in ordered_targets:
+                print(f"  {enemy} weighted danger: {enemy_weighted_danger[enemy]:.2f}, 1/health: {1/enemy.health:.2f}")
+        allocate_damage_to_targets(ordered_targets, attack_power, allocated_damage, remaining_health, verbose)
+    return allocated_damage
+
+# -----------------------------
+# NEW (Health‑Adjusted) Policies
+# -----------------------------
+def new_most_efficient_health(attacking_army, enemy_army, verbose=False):
+    allocated_damage = {enemy: 0 for enemy in enemy_army}
+    remaining_health = {enemy: enemy.health for enemy in enemy_army}
+    attackers = list(attacking_army)
+    random.shuffle(attackers)
+    for attacker in attackers:
+        available = [enemy for enemy in enemy_army
+                     if remaining_health[enemy] > 0 and enemy.unit_type in attacker.efficiencies]
+        if not available:
+            continue
+        ordered_targets = sorted(
+            available,
+            key=lambda enemy: (get_scaled_efficiency(attacker, enemy.unit_type) / enemy.health, 1/enemy.health),
+            reverse=True
+        )
+        attack_power = max(attacker.efficiencies.values())
+        if verbose:
+            print(f"{attacker} (power {attack_power}) NEW most_efficient_health targets: {ordered_targets}")
+        allocate_damage_to_targets(ordered_targets, attack_power, allocated_damage, remaining_health, verbose)
+    return allocated_damage
+
+def new_most_dangerous_health(attacking_army, enemy_army, verbose=False):
+    allocated_damage = {enemy: 0 for enemy in enemy_army}
+    remaining_health = {enemy: enemy.health for enemy in enemy_army}
+    attackers = list(attacking_army)
+    random.shuffle(attackers)
+    for attacker in attackers:
+        available = [enemy for enemy in enemy_army
+                     if remaining_health[enemy] > 0 and enemy.unit_type in attacker.efficiencies]
+        if not available:
+            continue
+        ordered_targets = sorted(
+            available,
+            key=lambda enemy: (get_scaled_efficiency(enemy, attacker.unit_type) / enemy.health, 1/enemy.health),
+            reverse=True
+        )
+        attack_power = max(attacker.efficiencies.values())
+        if verbose:
+            print(f"{attacker} (power {attack_power}) NEW most_dangerous_health targets: {ordered_targets}")
+        allocate_damage_to_targets(ordered_targets, attack_power, allocated_damage, remaining_health, verbose)
+    return allocated_damage
+
+def new_product_health(attacking_army, enemy_army, verbose=False):
+    allocated_damage = {enemy: 0 for enemy in enemy_army}
+    remaining_health = {enemy: enemy.health for enemy in enemy_army}
+    attackers = list(attacking_army)
+    random.shuffle(attackers)
+    for attacker in attackers:
+        available = [enemy for enemy in enemy_army
+                     if remaining_health[enemy] > 0 and enemy.unit_type in attacker.efficiencies]
+        if not available:
+            continue
+        candidates = []
+        for enemy in available:
+            effective_vul = get_scaled_efficiency(attacker, enemy.unit_type) / enemy.health
+            effective_danger = get_scaled_efficiency(enemy, attacker.unit_type)
+            product = effective_vul * effective_danger
+            candidates.append((enemy, product, 1/enemy.health))
+        candidates.sort(key=lambda x: (x[1], x[2]), reverse=True)
+        ordered_targets = [enemy for enemy, prod, _ in candidates]
+        attack_power = max(attacker.efficiencies.values())
+        if verbose:
+            print(f"{attacker} (power {attack_power}) NEW product_health targets:")
+            for enemy, prod, invh in candidates:
+                print(f"  {enemy} product: {prod:.2f}, 1/health: {invh:.2f}")
+        allocate_damage_to_targets(ordered_targets, attack_power, allocated_damage, remaining_health, verbose)
+    return allocated_damage
+
+def new_weighted_product_health(attacking_army, enemy_army, verbose=False):
+    allocated_damage = {enemy: 0 for enemy in enemy_army}
+    remaining_health = {enemy: enemy.health for enemy in enemy_army}
+    composition, total_attackers = compute_composition(attacking_army)
+    enemy_weighted_danger = {}
+    for enemy in enemy_army:
+        tot = sum(get_scaled_efficiency(enemy, t) * count for t, count in composition.items())
+        enemy_weighted_danger[enemy] = tot / total_attackers if total_attackers > 0 else 0
+    attackers = list(attacking_army)
+    random.shuffle(attackers)
+    for attacker in attackers:
+        available = [enemy for enemy in enemy_army
+                     if remaining_health[enemy] > 0 and enemy.unit_type in attacker.efficiencies]
+        if not available:
+            continue
+        candidates = []
+        for enemy in available:
+            effective_vul = get_scaled_efficiency(attacker, enemy.unit_type) / enemy.health
+            product = enemy_weighted_danger[enemy] * effective_vul
+            candidates.append((enemy, product, 1/enemy.health))
+        candidates.sort(key=lambda x: (x[1], x[2]), reverse=True)
+        ordered_targets = [enemy for enemy, prod, _ in candidates]
+        attack_power = max(attacker.efficiencies.values())
+        if verbose:
+            print(f"{attacker} (power {attack_power}) NEW weighted_product_health targets:")
+            for enemy, prod, invh in candidates:
+                print(f"  {enemy} weighted product: {prod:.2f}, 1/health: {invh:.2f} (weighted danger: {enemy_weighted_danger[enemy]:.2f})")
+        allocate_damage_to_targets(ordered_targets, attack_power, allocated_damage, remaining_health, verbose)
+    return allocated_damage
+
+def new_weighted_danger_health(attacking_army, enemy_army, verbose=False):
+    allocated_damage = {enemy: 0 for enemy in enemy_army}
+    remaining_health = {enemy: enemy.health for enemy in enemy_army}
+    composition, total_attackers = compute_composition(attacking_army)
+    enemy_weighted_danger = {}
+    for enemy in enemy_army:
+        tot = sum(get_scaled_efficiency(enemy, t) * count for t, count in composition.items())
+        enemy_weighted_danger[enemy] = tot / total_attackers if total_attackers > 0 else 0
+    attackers = list(attacking_army)
+    random.shuffle(attackers)
+    for attacker in attackers:
+        available = [enemy for enemy in enemy_army
+                     if remaining_health[enemy] > 0 and enemy.unit_type in attacker.efficiencies]
+        if not available:
+            continue
+        ordered_targets = sorted(
+            available,
+            key=lambda enemy: (enemy_weighted_danger[enemy]/enemy.health, 1/enemy.health),
+            reverse=True
+        )
+        attack_power = max(attacker.efficiencies.values())
+        if verbose:
+            print(f"{attacker} (power {attack_power}) NEW weighted_danger_health targets:")
+            for enemy in ordered_targets:
+                print(f"  {enemy} weighted danger: {enemy_weighted_danger[enemy]:.2f}, 1/health: {1/enemy.health:.2f}")
+        allocate_damage_to_targets(ordered_targets, attack_power, allocated_damage, remaining_health, verbose)
+    return allocated_damage
+
+# -----------------------------
+# Combat Simulation Function
+# -----------------------------
+def simulate_combat(army1, army2, policy_army1, policy_army2, verbose=False):
+    """
+    Simulates combat between two armies using the specified targeting policy functions.
+    The simulation runs in discrete time steps until one army is eliminated.
+    Returns (steps, remaining_army1, remaining_army2, history).
+    """
+    step = 0
+    history = {'steps': [], 'army1_counts': [], 'army2_counts': []}
+    history['steps'].append(step)
+    history['army1_counts'].append(len(army1))
+    history['army2_counts'].append(len(army2))
+
+    while army1 and army2:
+        if verbose:
+            print(f"\nTime Step {step}:")
+            print(f" Army1: {army1}")
+            print(f" Army2: {army2}")
+        damage_to_army2 = policy_army1(army1, army2, verbose=verbose)
+        damage_to_army1 = policy_army2(army2, army1, verbose=verbose)
+
+        new_army1 = []
+        for unit in army1:
+            dmg = damage_to_army1.get(unit, 0)
+            unit.health -= dmg
+            if verbose:
+                print(f" {unit} from Army1 takes {dmg} damage, new HP: {unit.health}")
+            if unit.health > 0:
+                new_army1.append(unit)
+            else:
+                if verbose:
+                    print(f" {unit} is destroyed!")
+        new_army2 = []
+        for unit in army2:
+            dmg = damage_to_army2.get(unit, 0)
+            unit.health -= dmg
+            if verbose:
+                print(f" {unit} from Army2 takes {dmg} damage, new HP: {unit.health}")
+            if unit.health > 0:
+                new_army2.append(unit)
+            else:
+                if verbose:
+                    print(f" {unit} is destroyed!")
+        army1, army2 = new_army1, new_army2
+        step += 1
+        history['steps'].append(step)
+        history['army1_counts'].append(len(army1))
+        history['army2_counts'].append(len(army2))
+
+    return step, army1, army2, history
+
+# -----------------------------
+# Functions to Create Fresh Armies
+# -----------------------------
+def create_army1():
+    return ([Unit("INF", 12, {"INF": 1, "MBT": 0.5, "DRN": 2}) for _ in range(200)] +
+            [Unit("MBT", 20, {"INF": 2, "MBT": 2, "DRN": 1}) for _ in range(8)] +
+            [Unit("ADT", 10, {"INF": 1, "MBT": 1, "DRN": 3}) for _ in range(7)])
+
+def create_army2():
+    return ([Unit("INF", 12, {"INF": 1, "MBT": 0.5, "ADT": 2}) for _ in range(200)] +
+            [Unit("MBT", 18, {"INF": 2, "MBT": 1.5, "ADT": 1}) for _ in range(7)] +
+            [Unit("DRN", 8, {"INF": 3, "MBT": 1, "ADT": 2}) for _ in range(10)])
+
+# -----------------------------
+# New Main Function: Run Simulations for All Policy Combinations
+# -----------------------------
+def main():
+    # Define the old and new policies with distinct names.
+    old_policies = {
+        "old_most_efficient": old_most_efficient,
+        "old_most_dangerous": old_most_dangerous,
+        "old_product": old_product,
+        "old_weighted_product": old_weighted_product,
+        "old_weighted_danger": old_weighted_danger
+    }
+    new_policies = {
+        "new_most_efficient": new_most_efficient_health,
+        "new_most_dangerous": new_most_dangerous_health,
+        "new_product": new_product_health,
+        "new_weighted_product": new_weighted_product_health,
+        "new_weighted_danger": new_weighted_danger_health
+    }
+
+    # Combine the two dictionaries.
+    combined_policies = {**old_policies, **new_policies}
+    policy_names = list(combined_policies.keys())
+
+    # Create a dictionary to hold results.
+    # Table: rows = Army1's policy, columns = Army2's policy.
+    results_table = {row: {} for row in policy_names}
+
+    for policy_army1_name in policy_names:
+        for policy_army2_name in policy_names:
+            # Create fresh copies of the armies for each simulation.
+            army1 = create_army1()
+            army2 = create_army2()
+            steps, remaining_army1, remaining_army2, history = simulate_combat(
+                army1, army2,
+                combined_policies[policy_army1_name],
+                combined_policies[policy_army2_name],
+                verbose=False
+            )
+            results_table[policy_army1_name][policy_army2_name] = (len(remaining_army1), len(remaining_army2))
+
+    # Convert results to a DataFrame for display.
+    df = pd.DataFrame(results_table).T
+    print("Results Table: (Surviving units Army1, Surviving units Army2)")
+    print(df)
+
+    # (Optional) Plot one example evolution from one simulation.
+    example_army1 = create_army1()
+    example_army2 = create_army2()
+    steps, rem_army1, rem_army2, history = simulate_combat(
+        example_army1, example_army2,
+        combined_policies["old_product"],
+        combined_policies["old_most_efficient"],
+        verbose=False
+    )
+    plt.figure(figsize=(8, 5))
+    plt.plot(history['steps'], history['army1_counts'], marker='o', label="Army 1 Units")
+    plt.plot(history['steps'], history['army2_counts'], marker='o', label="Army 2 Units")
+    plt.xlabel("Time Step")
+    plt.ylabel("Number of Units")
+    plt.title("Number of Units vs. Time Step (Example)")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+if __name__ == '__main__':
+    main()
+
